@@ -1,9 +1,8 @@
 #!/bin/bash
 set -e
-if ! which sing-box; then
+if ! which sing-box &> /dev/null; then
 	if [[ $(uname -m) == x86_64 ]]; then
-		wget https://github.com/SagerNet/sing-box/releases/download/v1.12.12/sing-box-1.12.12-linux-amd64.tar.gz || \
-		curl -O https://github.com/SagerNet/sing-box/releases/download/v1.12.12/sing-box-1.12.12-linux-amd64.tar.gz
+		wget https://github.com/SagerNet/sing-box/releases/download/v1.12.12/sing-box-1.12.12-linux-amd64.tar.gz
 		tar -xf sing-box-1.12.12-linux-amd64.tar.gz
 		mv ./sing-box-1.12.12-linux-amd64/sing-box /usr/local/bin
 		rm -rf sing-box-1.12.12-linux-amd64
@@ -30,11 +29,13 @@ make_config(){
       "users": [
         {
           "name": "lagsuc",
-	  	"uuid": "$uuid"
+          "uuid": "$uuid"
         }
       ],
       "tls": {
         "enabled": true,
+        "server_name": "tesla.com",
+        "alpn": ["h1","h2"],
         "reality": {
           "enabled": true,
           "handshake": {
@@ -62,4 +63,43 @@ eof
 	echo "This is your subscribe: vless://${uuid}@$(curl ifconfig.me):443?encryption=none&security=reality&sni=tesla.com&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#$1"
 }
 
+using_systemd(){
+	cat << 'eof' > /etc/systemd/system/sing-box.service
+[Unit]
+Description=Sing-box Service
+Documentation=https://sing-box.sagernet.org/
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+# 根据你的实际路径修改，可执行文件一般在 /usr/local/bin 或 /usr/bin
+ExecStart=/usr/local/bin/sing-box run -c /root/singbox/config.json
+
+# 建议启用以下增强安全性的设置（可按需开启/禁用）
+#CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+#AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# 崩溃后自动重启
+Restart=on-failure
+RestartSec=5
+
+# 资源限制（可选）
+LimitNOFILE=65535
+
+# 运行用户（可选，如果你已有 singbox 用户）
+#User=singbox
+#Group=singbox
+
+[Install]
+WantedBy=multi-user.target
+eof
+
+	sudo systemctl daemon-reload
+	sudo systemctl enable sing-box
+	sudo systemctl start sing-box
+}
+
 make_config $1
+
+using_systemd
