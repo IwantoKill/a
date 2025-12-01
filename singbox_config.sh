@@ -29,7 +29,7 @@ make_config(){
       "users": [
         {
           "name": "lagsuc",
-          "uuid": "513aa585-097c-40db-b04a-674794d3a9ac"
+          "uuid": "$uuid"
         }
       ],
       "tls": {
@@ -45,8 +45,8 @@ make_config(){
             "server": "tesla.com",
             "server_port": 443
           },
-          "private_key": "uOrUMe-vFx2wYf3wVctS22f9o_ClxNPBOZMNES-tmH4",
-          "short_id": "6db2626f2db6e090",
+          "private_key": "$private_key",
+          "short_id": "$short_id",
           "max_time_difference": "1m0s"
         }
       }
@@ -61,7 +61,7 @@ make_config(){
       "type": "shadowsocks",
       "tag": "ss-out",
       "server": "1.22.33.48",
-      "server_port": 65535,
+      "server_port": 5535,
       "method": "aes-128-gcm",
       "password": "xMUPk/K+LvP/YB95tlYqQInQzy/XSO2a26w0nX8weCA="
     }
@@ -73,7 +73,8 @@ make_config(){
         "rule_set": [
           "Tiktok",
           "Netflix",
-          "Gemini"
+          "Gemini",
+          "OpenAi"
         ],
         "outbound": "ss-out"
       }
@@ -98,6 +99,13 @@ make_config(){
         "tag": "Gemini",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/senshinya/singbox_ruleset/main/rule/Gemini/Gemini.srs",
+        "update_interval": "168h0m0s"
+      },
+      {
+        "type": "remote",
+        "tag": "OpenAi",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/senshinya/singbox_ruleset/main/rule/OpenAI/OpenAI.srs",
         "update_interval": "168h0m0s"
       }
     ],
