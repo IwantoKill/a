@@ -60,7 +60,7 @@ make_config(){
     {
       "type": "shadowsocks",
       "tag": "ss-out",
-      "server": "1.1.11.248",
+      "server": "1.22.33.48",
       "server_port": 65535,
       "method": "aes-128-gcm",
       "password": "xMUPk/K+LvP/YB95tlYqQInQzy/XSO2a26w0nX8weCA="
@@ -68,13 +68,6 @@ make_config(){
   ],
   "route": {
     "rules": [
-      {
-        "rule_set": [
-          "geoip-cn",
-          "geosite-cn"
-        ]
-        "outbound": "direct-out"
-      },
       {
         "inbound": "vless-in",
         "rule_set": [
@@ -108,9 +101,7 @@ make_config(){
         "update_interval": "168h0m0s"
       }
     ],
-    "final": "direct-out",
-    "default_domain_resolver": "others",
-    "default_network_strategy": "default"
+    "final": "direct-out"
   }
 }
 eof
