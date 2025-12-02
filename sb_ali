@@ -7,3 +7,11 @@ sudo systemctl disable apt-daily.service
 sudo systemctl disable apt-daily-upgrade.service
 sudo systemctl disable apt-daily.timer
 sudo systemctl disable apt-daily-upgrade.timer
+
+# 停止自动更新检查的定时器
+sudo systemctl stop apt-daily.timer
+sudo systemctl stop apt-daily-upgrade.timer
+
+# 禁用这些定时器，防止它们下次开机或重启后再次启动
+sudo systemctl disable apt-daily.timer
+sudo systemctl disable apt-daily-upgrade.timer
