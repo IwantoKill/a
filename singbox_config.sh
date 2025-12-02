@@ -9,50 +9,7 @@ if ! which sing-box &> /dev/null; then
 	fi
 fi
 
-make_config(){
-	uuid=$(sing-box generate uuid)
-	generate=$(sing-box generate reality-keypair)
-	private_key=$(echo "$generate" | awk '/PrivateKey/ {print $2}')
-	public_key=$(echo "$generate" | awk '/PublicKey/ {print $2}')
-	short_id=$(sing-box generate rand 8 --hex)
-	mkdir -p ~/singbox
-	cat << eof > ~/singbox/config.json
-{
-  "inbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-in",
-      "listen": "::",
-      "listen_port": 443,
-      "tcp_fast_open": true,
-      "tcp_multi_path": true,
-      "users": [
-        {
-          "name": "lagsuc",
-          "uuid": "$uuid"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "tesla.com",
-        "alpn": [
-          "h1",
-          "h2"
-        ],
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "tesla.com",
-            "server_port": 443
-          },
-          "private_key": "$private_key",
-          "short_id": "$short_id",
-          "max_time_difference": "1m0s"
-        }
-      }
-    }
-  ],
-  "outbounds": [
+default_config='  "outbounds": [
     {
       "type": "direct",
       "tag": "direct-out"
@@ -110,11 +67,112 @@ make_config(){
       }
     ],
     "final": "direct-out"
-  }
+  }'
+
+appli(){
+	apt update
+	curl https://get.acme.sh | sh; apt install socat -y || yum install socat -y; ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+	~/.acme.sh/acme.sh --issue -d $server_name --standalone -k ec-256 --force --insecure
+	~/.acme.sh/acme.sh --install-cert -d $server_name --ecc --key-file ~/certificate/server.key --fullchain-file ~/certificate/server.crt
+}
+
+vless(){
+	uuid=$(sing-box generate uuid)
+	generate=$(sing-box generate reality-keypair)
+	private_key=$(echo "$generate" | awk '/PrivateKey/ {print $2}')
+	public_key=$(echo "$generate" | awk '/PublicKey/ {print $2}')
+	short_id=$(sing-box generate rand 8 --hex)
+	mkdir -p ~/singbox
+	cat << eof > ~/singbox/config.json
+{
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "::",
+      "listen_port": 443,
+      "tcp_fast_open": true,
+      "tcp_multi_path": true,
+      "users": [
+        {
+          "name": "lagsuc",
+          "uuid": "$uuid"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "tesla.com",
+        "alpn": [
+          "h1",
+          "h2"
+        ],
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "tesla.com",
+            "server_port": 443
+          },
+          "private_key": "$private_key",
+          "short_id": "$short_id",
+          "max_time_difference": "1m0s"
+        }
+      }
+    }
+  ],
+  $default_config
 }
 eof
 	sing-box -D ~/singbox check &> /dev/null
-	echo "This is your subscribe: vless://${uuid}@$(curl ifconfig.me):443?encryption=none&security=reality&sni=tesla.com&fp=edge&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#$1"
+	echo "This is your subscribe: vless://${uuid}@$(curl ifconfig.me):443?encryption=none&security=reality&sni=tesla.com&fp=edge&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#$2"
+}
+
+tuic(){
+	uuid=$(sing-box generate uuid)
+
+	passwd=$(sing-box generate rand 12 --base64)
+	mkdir -p ~/singbox ~/certificate
+
+	if [[ ! -f ~/certificate/server.crt && ! -f ~/certificate/server.key ]]; then
+		appli
+	fi
+
+	cat << eof > ~/singbox/config.json
+{
+  "inbounds": [
+    {
+	  "type": "tuic",
+	  "tag": "tuic-in",
+	
+      "listen": "::",
+      "listen_port": 443,
+      "tcp_fast_open": true,
+      "tcp_multi_path": true,
+	
+	  "users": [
+	    {
+	      "name": "lagsuc",
+	      "uuid": "$uuid",
+	      "password": "$passwd"
+	    }
+	  ],
+	  "congestion_control": "bbr",
+	  "auth_timeout": "3s",
+	  "zero_rtt_handshake": false,
+	  "heartbeat": "10s",
+	  "tls": {
+	  	"enabled": true,
+	  	"server_name": "$server_name",
+	  	"alpn": ["h3"],
+	  	"certificate_path": "/root/certificate/server.crt",
+	  	"key_path": "/root/certificate/server.key"
+	  }
+	}
+  ],
+  $default_config
+}
+eof
+	sing-box -D ~/singbox check &> /dev/null
+	echo "This is your subscribe: tuic://${uuid}:${passwd}@$(curl ifconfig.me):443?sni=$server_name&alpn=h3&congestion_control=bbr#$3"
 }
 
 using_systemd(){
@@ -154,6 +212,21 @@ eof
 	sudo systemctl start sing-box
 }
 
-make_config $1
+while getopts "s:" opt; do
+	case $opt in
+		s)
+			server_name=$OPTARG
+			;;
+		\?)
+			echo "Unkonw args"
+			exit 1
+			;;
+			
+	esac
+done
+
+shift $((OPTIND - 1))
+
+$1 $2
 
 using_systemd
