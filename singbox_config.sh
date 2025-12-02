@@ -220,7 +220,7 @@ eof
 
 	sudo systemctl daemon-reload
 	sudo systemctl enable sing-box
-	sudo systemctl start sing-box
+	sudo systemctl stop sing-box || sudo systemctl start sing-box
 }
 
 while getopts "s:" opt; do
