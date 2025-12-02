@@ -133,7 +133,10 @@ vless(){
 eof
 	sing-box -D ~/singbox check &> /dev/null
 	sed -i 's/.*link=.*//' ~/.bashrc
-	echo "export link='vless://${uuid}@$(curl ifconfig.me):443?encryption=none&security=reality&sni=tesla.com&fp=edge&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#$2'" >> ~/.bashrc
+
+	local link="vless://${uuid}@$(curl ifconfig.me):443?encryption=none&security=reality&sni=tesla.com&fp=edge&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#$2"
+	
+	echo "export link='$link'" >> ~/.bashrc
 	source ~/.bashrc
 	echo "This is your link: $link"
 }
@@ -188,7 +191,10 @@ eof
 	sing-box -D ~/singbox check &> /dev/null
 
 	sed -i 's/.*link=.*//' ~/.bashrc
-	echo "export link='tuic://${uuid}:${passwd}@$(curl ifconfig.me):443?sni=$server_name&alpn=h3&congestion_control=bbr#$3'" >> ~/.bashrc
+
+	local link="tuic://${uuid}:${passwd}@$(curl ifconfig.me):443?sni=$server_name&alpn=h3&congestion_control=bbr#$2"
+	
+	echo "export link='$link'" >> ~/.bashrc
 	source ~/.bashrc
 	echo "This is your link: $link"
 }
