@@ -37,7 +37,7 @@ default_config='  "outbounds": [
     ],
     "rule_set": [
       {
-        "type": "remote", // or source
+        "type": "remote",
         "tag": "Tiktok",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/senshinya/singbox_ruleset/main/rule/TikTok/TikTok.srs",
