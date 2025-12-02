@@ -5,7 +5,7 @@ if ! which sing-box &> /dev/null; then
 		wget https://github.com/SagerNet/sing-box/releases/download/v1.12.12/sing-box-1.12.12-linux-amd64.tar.gz
 		tar -xf sing-box-1.12.12-linux-amd64.tar.gz
 		mv ./sing-box-1.12.12-linux-amd64/sing-box /usr/local/bin
-		rm -rf sing-box-1.12.12-linux-amd64
+		rm -rf sing-box-1.12.12-linux-amd64 sing-box-1.12.12-linux-amd64.tar.gz
 	fi
 fi
 
