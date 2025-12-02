@@ -26,7 +26,6 @@ default_config='  "outbounds": [
   "route": {
     "rules": [
       {
-        "inbound": "vless-in",
         "rule_set": [
           "Tiktok",
           "Netflix",
