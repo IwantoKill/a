@@ -17,7 +17,7 @@ default_config='  "outbounds": [
     {
       "type": "shadowsocks",
       "tag": "ss-out",
-      "server": "1.22.33.48",
+      "server": "",
       "server_port": 5535,
       "method": "aes-128-gcm",
       "password": "xMUPk/K+LvP/YB95tlYqQInQzy/XSO2a26w0nX8weCA="
@@ -68,6 +68,16 @@ default_config='  "outbounds": [
     ],
     "final": "direct-out"
   }'
+
+enable_bbr(){
+	sed -i 's/.*net.core.default_qdisc.*//' /etc/sysctl.conf
+	sed -i 's/.*net.ipv4.tcp_congestion_control.*//' /etc/sysctl.conf
+	cat << 'eof' >> /etc/sysctl.conf
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+eof
+	sudo sysctl -p &> /dev/null
+}
 
 appli(){
 	apt update
@@ -136,6 +146,8 @@ tuic(){
 		appli
 	fi
 
+	enable_bbr
+	
 	cat << eof > ~/singbox/config.json
 {
   "inbounds": [
