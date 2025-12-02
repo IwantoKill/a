@@ -136,9 +136,10 @@ eof
 
 	local link="vless://${uuid}@$(curl ifconfig.me):443?encryption=none&security=reality&sni=tesla.com&fp=edge&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#$2"
 	
-	echo "export link='$link'" >> ~/.bashrc
+	
 	source ~/.bashrc
 	echo "This is your link: $link"
+	echo "export link='$link'" >> ~/.bashrc
 }
 
 tuic(){
@@ -194,9 +195,11 @@ eof
 
 	local link="tuic://${uuid}:${passwd}@$(curl ifconfig.me):443?sni=$server_name&alpn=h3&congestion_control=bbr#$2"
 	
-	echo "export link='$link'" >> ~/.bashrc
+	
 	source ~/.bashrc
 	echo "This is your link: $link"
+
+	echo "export link='$link'" >> ~/.bashrc
 }
 
 using_systemd(){
