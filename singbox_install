@@ -14,7 +14,7 @@ CERT_Path="${CONFIG_PATH}/cert"
 
 # 默认参数
 NODE_TYPE="vless"       # 默认协议
-PORT=4433               # 默认端口
+PORT=443               # 默认端口
 LISTEN_IP="::"          # 监听所有 IP
 SERVER_DOMAIN=""        # 域名
 DNS_SERVER=""           # DNS 服务器 (空则不配置)
