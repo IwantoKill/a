@@ -2,7 +2,9 @@
 
 # ==================================================
 # Sing-box 全能一键安装脚本 (VLESS/VMess/TUIC/Shadowsocks)
-# 支持: Docker/Node环境, 自动证书生成, DNS定制, 输出导入链接
+# 支持: Docker/Node环境, 自动证书生成, DNS定制
+# 本脚本在原有逻辑基础上增加：生成可被 v2rayN 一键导入的链接（vmess/vless/shadowsocks）
+# 若使用 IP 模式（未提供域名），会通过 ifconfig.me / ipinfo.io / icanhazip.com 获取公网 IP
 # ==================================================
 
 # --- 默认变量 ---
@@ -14,13 +16,12 @@ CERT_Path="${CONFIG_PATH}/cert"
 
 # 默认参数
 NODE_TYPE="vless"       # 默认协议
-PORT=443               # 默认端口
+PORT=4433               # 默认端口
 LISTEN_IP="::"          # 监听所有 IP
 SERVER_DOMAIN=""        # 域名
 DNS_SERVER=""           # DNS 服务器 (空则不配置)
 ENABLE_TLS=false        # VMess 是否启用 TLS
 WS_PATH="/ws"           # VMess WebSocket 路径
-SERVER_IP=""            # 运行脚本时获取的服务器公网 IP
 
 # 颜色
 RED='\033[0;31m'
@@ -47,24 +48,31 @@ while getopts "d:t:v:p:D:s" opt; do
   esac
 done
 
-# 如果没有域名，使用 IP 占位或偷取目标
+# 如果没有域名，尝试获取公网 IP
 if [ -z "$SERVER_DOMAIN" ]; then
-    SERVER_NAME_FOR_SNI="www.microsoft.com" # Reality 默认偷取/VMess的SNI
-    IS_CUSTOM_DOMAIN=false
-    echo -e "${YELLOW}[Info] 未提供域名，使用默认/IP模式${NC}"
+    echo -e "${YELLOW}[Info] 未提供域名，尝试获取公网 IP 作为服务器地址${NC}"
+    # 尝试多个服务（按顺序）
+    PUBLIC_IP=""
+    for svc in "https://ifconfig.me" "https://ipinfo.io/ip" "https://icanhazip.com"; do
+        PUBLIC_IP=$(curl -s --max-time 5 "$svc")
+        if [ -n "$PUBLIC_IP" ]; then
+            break
+        fi
+    done
+
+    if [ -n "$PUBLIC_IP" ]; then
+        SERVER_DOMAIN="$PUBLIC_IP"
+        IS_CUSTOM_DOMAIN=false
+        echo -e "${GREEN}[Info] 检测到公网 IP: ${SERVER_DOMAIN}${NC}"
+    else
+        # 回退到原脚本的行为（用于 Reality 偷取）
+        SERVER_DOMAIN="www.microsoft.com"
+        IS_CUSTOM_DOMAIN=false
+        echo -e "${YELLOW}[Warning] 无法从外部服务获取公网 IP，回退到默认域名占位: ${SERVER_DOMAIN}${NC}"
+    fi
 else
-    SERVER_NAME_FOR_SNI="${SERVER_DOMAIN}"
     IS_CUSTOM_DOMAIN=true
     echo -e "${GREEN}[Info] 使用域名: ${SERVER_DOMAIN}${NC}"
-fi
-
-# 尝试获取公网 IP，用于生成链接
-SERVER_IP=$(curl -s --max-time 5 https://api.ipify.org || curl -s --max-time 5 https://ipecho.net/plain)
-if [ -z "$SERVER_IP" ]; then
-    SERVER_IP="<服务器IP>"
-    echo -e "${YELLOW}[Warning] 无法自动获取公网IP，请手动替换 ${SERVER_IP} 占位符。${NC}"
-else
-    echo -e "${GREEN}[Info] 检测到服务器IP: ${SERVER_IP}${NC}"
 fi
 
 # --- 2. 环境检查与安装 ---
@@ -103,15 +111,15 @@ if [ ! -f "${INSTALL_PATH}" ]; then
 fi
 
 # --- 4. 辅助函数：证书生成 ---
+# 用于 TUIC 或 VMess+TLS 在没有现成证书的情况
 generate_self_signed_cert() {
     local key_file="${CERT_Path}/private.key"
     local cert_file="${CERT_Path}/cert.pem"
     
+    # 只有当文件不存在时才生成，避免覆盖
     if [ ! -f "$key_file" ]; then
         echo -e "${YELLOW}[Info] 生成自签名证书 (用于 TUIC/VMess-TLS)...${NC}"
-        # 使用 SERVER_IP 或 SERVER_NAME_FOR_SNI 作为证书的 CN
-        CERT_CN=${IS_CUSTOM_DOMAIN_true} && echo "$SERVER_NAME_FOR_SNI" || echo "$SERVER_IP"
-        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_file" -out "$cert_file" -days 3650 -subj "/CN=${CERT_CN}" 2>/dev/null
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_file" -out "$cert_file" -days 3650 -subj "/CN=${SERVER_DOMAIN}" 2>/dev/null
     fi
 }
 
@@ -128,21 +136,34 @@ if [ ! -z "$DNS_SERVER" ]; then
     echo -e "${GREEN}[Info] DNS 已配置为: ${DNS_SERVER}${NC}"
 fi
 
-# 入站配置块 (Inbound) 和 链接信息初始化
+# --- 辅助: URL encode & base64 helper ---
+urlencode() {
+  local raw="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$raw"
+  elif command -v python >/dev/null 2>&1; then
+    python -c "import sys,urllib; print urllib.quote(sys.argv[1])" "$raw"
+  else
+    # 最小替换以避免不可导入字符
+    echo -n "$raw" | sed -e 's/ /%20/g' -e 's/+/%2B/g' -e 's/@/%40/g' -e 's/:/%3A/g' -e 's/\//%2F/g'
+  fi
+}
+
+b64() {
+  # 把输入字符串 base64 后去掉换行，兼容各种系统
+  echo -n "$1" | base64 | tr -d '\n'
+}
+
+# 入站配置块 (Inbound)
 INBOUND_JSON=""
-IMPORT_LINK=""
-CLIENT_ADDR=${IS_CUSTOM_DOMAIN} && echo "$SERVER_DOMAIN" || echo "$SERVER_IP" # 客户端连接地址，优先域名
 
 case $NODE_TYPE in
     "vless")
-        # VLESS + Reality
+        # VLESS + Reality (最简便，无需自签证书)
         KEYS=$(${INSTALL_PATH} generate reality-keypair)
         PRIVATE_KEY=$(echo "$KEYS" | grep "Private" | awk '{print $3}')
         PUBLIC_KEY=$(echo "$KEYS" | grep "Public" | awk '{print $3}')
         SHORT_ID=$(${INSTALL_PATH} generate rand --hex 8)
-        
-        # URL 编码 Reality 参数
-        TRANSPORT_PARAMS="security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${SERVER_NAME_FOR_SNI}&sid=${SHORT_ID}&spx=%2F"
         
         INBOUND_JSON=$(cat <<EOF
         {
@@ -153,10 +174,10 @@ case $NODE_TYPE in
             "users": [{ "uuid": "${UUID}", "flow": "xtls-rprx-vision", "name": "user1" }],
             "tls": {
                 "enabled": true,
-                "server_name": "${SERVER_NAME_FOR_SNI}",
+                "server_name": "${SERVER_DOMAIN}",
                 "reality": {
                     "enabled": true,
-                    "handshake": { "server": "${SERVER_NAME_FOR_SNI}", "server_port": 443 },
+                    "handshake": { "server": "${SERVER_DOMAIN}", "server_port": 443 },
                     "private_key": "${PRIVATE_KEY}",
                     "short_id": ["${SHORT_ID}"]
                 }
@@ -164,15 +185,11 @@ case $NODE_TYPE in
         }
 EOF
 )
-        IMPORT_LINK="vless://${UUID}@${CLIENT_ADDR}:${PORT}?${TRANSPORT_PARAMS}#SingBox_Reality"
     ;;
     
     "vmess")
         # VMess + WS + (Optional TLS)
         TLS_JSON=""
-        VMESS_SECURITY="auto"
-        VMESS_TLS_PARAM=""
-        
         if [ "$ENABLE_TLS" = true ]; then
             generate_self_signed_cert
             TLS_JSON=$(cat <<EOF
@@ -183,17 +200,8 @@ EOF
             }
 EOF
 )
-            VMESS_SECURITY="tls"
-            VMESS_TLS_PARAM="&security=tls&allowInsecure=true&sni=${SERVER_NAME_FOR_SNI}"
         fi
         
-        # Base64 编码 Vmess 链接
-        VMESS_CONF_JSON=$(cat <<EOF
-{"v": "2", "ps": "SingBox_VMess", "add": "${CLIENT_ADDR}", "port": ${PORT}, "id": "${UUID}", "aid": "0", "net": "ws", "type": "none", "host": "", "path": "${WS_PATH}", "tls": "${VMESS_SECURITY}"}
-EOF
-)
-        IMPORT_LINK="vmess://$(echo -n "$VMESS_CONF_JSON" | base64 -w 0)"
-
         INBOUND_JSON=$(cat <<EOF
         {
             "type": "vmess",
@@ -214,10 +222,6 @@ EOF
     "tuic")
         # TUIC V5 (必须 TLS)
         generate_self_signed_cert
-        
-        # TUIC 链接格式 (基于 Sing-box URI 规范)
-        IMPORT_LINK="tuic://${UUID}:${PASSWORD}@${CLIENT_ADDR}:${PORT}?congestion_control=bbr&udp_relay_mode=native&tls=1&allow_insecure=1&alpn=h3#SingBox_TUIC"
-        
         INBOUND_JSON=$(cat <<EOF
         {
             "type": "tuic",
@@ -240,10 +244,6 @@ EOF
     "shadowsocks")
         # Shadowsocks 2022
         METHOD="2022-blake3-aes-128-gcm"
-        # SS 链接格式
-        BASE64_CRED=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0)
-        IMPORT_LINK="ss://${BASE64_CRED}@${CLIENT_ADDR}:${PORT}#SingBox_SS2022"
-        
         INBOUND_JSON=$(cat <<EOF
         {
             "type": "shadowsocks",
@@ -297,44 +297,117 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable sing-box
-    systemctl restart sing-box
+    systemctl.restart sing-box 2>/dev/null || systemctl restart sing-box
 else
-    # Docker/容器模式
+    # Docker/容器模式：仅提示，不阻塞脚本结束
     echo -e "${YELLOW}[Warning] 无 Systemd 环境，请使用以下命令启动:${NC}"
     echo -e "${GREEN}${RUN_CMD} &${NC}"
 fi
 
-# --- 8. 输出连接信息 (新增导入链接) ---
+# --- 8. 生成并输出可导入 v2rayN 的链接 ---
+# 说明：
+# - vmess: 生成 vmess://<base64(JSON)> 格式（v2rayN/大多数客户端支持）
+# - vless (现实): 生成 vless://... 形式，包含 reality 的 pbk/sid 参数，供 v2rayN/v2rayNG/其它支持 reality 的客户端导入
+# - shadowsocks: 生成 ss://base64(method:password)@host:port#tag
+# - tuic: 大多数传统 v2ray 客户端（v2rayN）不支持 TUIC，因此不生成导入链接，仅输出配置项
+
+# 服务器（客户端导入时使用的地址）
+HOST_FOR_CLIENT="${SERVER_DOMAIN}"
+
+# VLESS/VMess 需要的变量可能已经在上面生成（PUBLIC_KEY/SHORT_ID/UUID/PASSWORD）
+
+# 生成链接（按类型输出）
 echo -e "\n=================================================="
 echo -e "         ${GREEN}Sing-box 配置完成: ${NODE_TYPE}${NC}"
 echo -e "=================================================="
-echo -e "连接地址: ${CLIENT_ADDR}"
-echo -e "端口    : ${PORT}"
-echo -e "UUID    : ${YELLOW}${UUID}${NC}"
+echo -e "端口: ${PORT}"
+echo -e "UUID: ${YELLOW}${UUID}${NC}"
 
 if [ "$NODE_TYPE" == "vless" ]; then
-    echo -e "Reality 公钥: ${YELLOW}${PUBLIC_KEY}${NC}"
-    echo -e "Reality Short ID: ${YELLOW}${SHORT_ID}${NC}"
-    echo -e "Reality SNI: ${SERVER_NAME_FOR_SNI}"
+    echo -e "类型: VLESS + Reality + Vision"
+    echo -e "Public Key: ${YELLOW}${PUBLIC_KEY}${NC}"
+    echo -e "Short ID: ${YELLOW}${SHORT_ID}${NC}"
+    echo -e "Domain/IP: ${HOST_FOR_CLIENT}"
+
+    # URL encode 公钥和 short id
+    PBK_ENC=$(urlencode "${PUBLIC_KEY}")
+    SID_ENC=$(urlencode "${SHORT_ID}")
+
+    # vless URL（尽可能符合 v2rayN/标准）：
+    # vless://UUID@host:port?encryption=none&security=reality&pbk=PUBLIC_KEY&sid=SHORT_ID&flow=xtls-rprx-vision#tag
+    VLESS_URI="vless://${UUID}@${HOST_FOR_CLIENT}:${PORT}?encryption=none&security=reality&pbk=${PBK_ENC}&sid=${SID_ENC}&flow=xtls-rprx-vision#sing-box"
+
+    echo -e "\n[可导入 v2rayN 的 VLESS (Reality) 链接]"
+    echo -e "${VLESS_URI}"
 
 elif [ "$NODE_TYPE" == "vmess" ]; then
-    echo -e "传输方式: WebSocket (Path: ${WS_PATH})"
+    echo -e "类型: VMess + WS"
+    echo -e "Path: ${WS_PATH}"
     if [ "$ENABLE_TLS" = true ]; then
         echo -e "TLS : ${GREEN}Enabled (自签名/指定证书)${NC}"
-        echo -e "注意: 客户端需启用 不安全连接 (allowInsecure)"
+        echo -e "注意: 客户端需开启 allowInsecure (如果使用自签名)"
     else
         echo -e "TLS : ${RED}Disabled${NC}"
     fi
 
+    # 构造 vmess JSON（v2ray 标准字段）
+    VMESS_JSON=$(cat <<EOF
+{
+  "v":"2",
+  "ps":"sing-box",
+  "add":"${HOST_FOR_CLIENT}",
+  "port":"${PORT}",
+  "id":"${UUID}",
+  "aid":"0",
+  "net":"ws",
+  "type":"none",
+  "host":"",
+  "path":"${WS_PATH}",
+  "tls":"$( [ "$ENABLE_TLS" = true ] && echo "tls" || echo "" )"
+}
+EOF
+)
+    VMESS_URI="vmess://$(b64 "${VMESS_JSON}")"
+
+    echo -e "\n[可导入 v2rayN 的 VMess 链接]"
+    echo -e "${VMESS_URI}"
+
 elif [ "$NODE_TYPE" == "tuic" ]; then
+    echo -e "类型: TUIC V5 (QUIC)"
     echo -e "Password: ${YELLOW}${PASSWORD}${NC}"
-    echo -e "注意: TUIC 强制使用 TLS，已生成自签名证书。客户端需启用 allowInsecure 选项。"
+    echo -e "注意: TUIC 强制使用 TLS，已生成自签名证书。"
+    echo -e "客户端请开启 allowInsecure 选项。"
+
+    # 按你提供的新格式生成可分享的 TUIC 链接（使用 ifconfig.me 获取公网 IP，sni 使用 SERVER_DOMAIN）
+    # link="tuic://${uuid}:${passwd}@$(curl ifconfig.me):443?sni=$server_name&alpn=h3&congestion_control=bbr"
+    TUIC_HOST="$(curl -s ifconfig.me || echo ${HOST_FOR_CLIENT})"
+    TUIC_LINK="tuic://${UUID}:${PASSWORD}@${TUIC_HOST}:443?sni=${SERVER_DOMAIN}&alpn=h3&congestion_control=bbr"
+
+    echo -e "
+[可导入/分享的 TUIC 链接（新格式）]"
+    echo -e "${TUIC_LINK}"
+
+    echo -e "
+[提示] 请确保客户端已支持 TUIC，并根据需要开启 allowInsecure（若使用自签名证书）。"
 
 elif [ "$NODE_TYPE" == "shadowsocks" ]; then
     echo -e "Password: ${YELLOW}${PASSWORD}${NC}"
     echo -e "Method: ${METHOD}"
+
+    # ss 链接: ss://base64(method:password)@host:port#tag
+    SS_PART=$(b64 "${METHOD}:${PASSWORD}")
+    SS_URI="ss://${SS_PART}@${HOST_FOR_CLIENT}:${PORT}#sing-box"
+
+    echo -e "\n[可导入 v2rayN 的 Shadowsocks 链接]"
+    echo -e "${SS_URI}"
 fi
 
-echo -e "\n--- ${YELLOW}V2RayN/Clash 等客户端导入链接${NC} ---"
-echo -e "${GREEN}${IMPORT_LINK}${NC}"
 echo -e "=================================================="
+
+# 输出配置文件路径便于手动查看
+echo -e "配置文件: ${CONFIG_FILE}"
+echo -e "证书目录: ${CERT_Path} (如使用 TLS/TUIC)"
+echo -e "=================================================="
+
+# 结束
+exit 0
