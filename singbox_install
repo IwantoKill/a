@@ -1,0 +1,303 @@
+#!/bin/bash
+
+# ==================================================
+# Sing-box 全能一键安装脚本 (VLESS/VMess/TUIC/Shadowsocks)
+# 支持: Docker/Node环境, 自动证书生成, DNS定制
+# ==================================================
+
+# --- 默认变量 ---
+SB_VERSION="1.12.13"
+INSTALL_PATH="/usr/local/bin/sing-box"
+CONFIG_PATH="/etc/sing-box"
+CONFIG_FILE="${CONFIG_PATH}/config.json"
+CERT_Path="${CONFIG_PATH}/cert"
+
+# 默认参数
+NODE_TYPE="vless"       # 默认协议
+PORT=443               # 默认端口
+LISTEN_IP="::"          # 监听所有 IP
+SERVER_DOMAIN=""        # 域名
+DNS_SERVER=""           # DNS 服务器 (空则不配置)
+ENABLE_TLS=false        # VMess 是否启用 TLS
+WS_PATH="/ws"           # VMess WebSocket 路径
+
+# 颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+# --- 1. 参数解析 ---
+# -d: 域名
+# -t: 类型 (vless, vmess, tuic, shadowsocks)
+# -p: 端口
+# -v: 版本
+# -D: DNS地址 (例如 1.1.1.1)
+# -s: 开启 VMess 的 TLS (开关量，不需要值)
+while getopts "d:t:v:p:D:s" opt; do
+  case $opt in
+    s) SERVER_DOMAIN=$OPTARG ;;
+    t) NODE_TYPE=$OPTARG ;;
+    v) SB_VERSION=$OPTARG ;;
+    p) PORT=$OPTARG ;;
+    d) DNS_SERVER=$OPTARG ;;
+    e) ENABLE_TLS=true ;;
+    \?) echo "无效参数: -$OPTARG"; exit 1 ;;
+  esac
+done
+
+# 如果没有域名，使用 IP 占位或偷取目标
+if [ -z "$SERVER_DOMAIN" ]; then
+    SERVER_DOMAIN="www.microsoft.com" # Reality 默认偷取
+    IS_CUSTOM_DOMAIN=false
+    echo -e "${YELLOW}[Info] 未提供域名，使用默认/IP模式${NC}"
+else
+    IS_CUSTOM_DOMAIN=true
+    echo -e "${GREEN}[Info] 使用域名: ${SERVER_DOMAIN}${NC}"
+fi
+
+# --- 2. 环境检查与安装 ---
+install_depend() {
+    echo -e "${GREEN}[Step 1] 检查并安装依赖...${NC}"
+    if command -v apt-get >/dev/null; then
+        apt-get update -y && apt-get install -y curl wget tar openssl
+    elif command -v apk >/dev/null; then
+        apk add --no-cache curl wget tar openssl ca-certificates
+    elif command -v yum >/dev/null; then
+        yum install -y curl wget tar openssl
+    else
+        echo -e "${RED}[Error] 未知系统，请手动安装 curl, tar, openssl${NC}"
+        exit 1
+    fi
+}
+
+if ! command -v curl >/dev/null || ! command -v tar >/dev/null || ! command -v openssl >/dev/null; then
+    install_depend
+fi
+
+# --- 3. 下载 Sing-box ---
+echo -e "${GREEN}[Step 2] 下载 Sing-box v${SB_VERSION}...${NC}"
+ARCH="amd64"
+DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/sing-box-${SB_VERSION}-linux-${ARCH}.tar.gz"
+
+mkdir -p ${CONFIG_PATH}
+mkdir -p ${CERT_Path}
+
+if [ ! -f "${INSTALL_PATH}" ]; then
+    curl -L -o sing-box.tar.gz "${DOWNLOAD_URL}"
+    tar -xzf sing-box.tar.gz
+    mv sing-box-${SB_VERSION}-linux-${ARCH}/sing-box ${INSTALL_PATH}
+    chmod +x ${INSTALL_PATH}
+    rm -rf sing-box.tar.gz sing-box-${SB_VERSION}-linux-${ARCH}
+fi
+
+# --- 4. 辅助函数：证书生成 ---
+# 用于 TUIC 或 VMess+TLS 在没有现成证书的情况
+generate_self_signed_cert() {
+    local key_file="${CERT_Path}/private.key"
+    local cert_file="${CERT_Path}/cert.pem"
+    
+    # 只有当文件不存在时才生成，避免覆盖
+    if [ ! -f "$key_file" ]; then
+        echo -e "${YELLOW}[Info] 生成自签名证书 (用于 TUIC/VMess-TLS)...${NC}"
+        openssl req -x509 -newkey rsa:2048 -nodes -sha256 -keyout "$key_file" -out "$cert_file" -days 3650 -subj "/CN=${SERVER_DOMAIN}" 2>/dev/null
+    fi
+}
+
+# --- 5. 构建配置 JSON 片段 ---
+
+# 通用 UUID/Password
+UUID=$(${INSTALL_PATH} generate uuid)
+PASSWORD=$(${INSTALL_PATH} generate rand --base64 16)
+
+# DNS 配置块
+DNS_CONFIG=""
+if [ ! -z "$DNS_SERVER" ]; then
+    DNS_CONFIG="\"dns\": { \"servers\": [{\"tag\": \"google\", \"address\": \"${DNS_SERVER}\", \"detour\": \"direct\"}], \"rules\": [] },"
+    echo -e "${GREEN}[Info] DNS 已配置为: ${DNS_SERVER}${NC}"
+fi
+
+# 入站配置块 (Inbound)
+INBOUND_JSON=""
+
+case $NODE_TYPE in
+    "vless")
+        # VLESS + Reality (最简便，无需自签证书)
+        KEYS=$(${INSTALL_PATH} generate reality-keypair)
+        PRIVATE_KEY=$(echo "$KEYS" | grep "Private" | awk '{print $3}')
+        PUBLIC_KEY=$(echo "$KEYS" | grep "Public" | awk '{print $3}')
+        SHORT_ID=$(${INSTALL_PATH} generate rand --hex 8)
+        
+        INBOUND_JSON=$(cat <<EOF
+        {
+            "type": "vless",
+            "tag": "vless-in",
+            "listen": "${LISTEN_IP}",
+            "listen_port": ${PORT},
+            "users": [{ "uuid": "${UUID}", "flow": "xtls-rprx-vision", "name": "user1" }],
+            "tls": {
+                "enabled": true,
+                "server_name": "${SERVER_DOMAIN}",
+                "reality": {
+                    "enabled": true,
+                    "handshake": { "server": "${SERVER_DOMAIN}", "server_port": 443 },
+                    "private_key": "${PRIVATE_KEY}",
+                    "short_id": ["${SHORT_ID}"]
+                }
+            }
+        }
+EOF
+)
+    ;;
+    
+    "vmess")
+        # VMess + WS + (Optional TLS)
+        TLS_JSON=""
+        if [ "$ENABLE_TLS" = true ]; then
+            generate_self_signed_cert
+            TLS_JSON=$(cat <<EOF
+            , "tls": {
+                "enabled": true,
+                "certificate_path": "${CERT_Path}/cert.pem",
+                "key_path": "${CERT_Path}/private.key"
+            }
+EOF
+)
+        fi
+        
+        INBOUND_JSON=$(cat <<EOF
+        {
+            "type": "vmess",
+            "tag": "vmess-in",
+            "listen": "${LISTEN_IP}",
+            "listen_port": ${PORT},
+            "users": [{ "uuid": "${UUID}", "name": "user1" }],
+            "transport": {
+                "type": "ws",
+                "path": "${WS_PATH}"
+            }
+            ${TLS_JSON}
+        }
+EOF
+)
+    ;;
+    
+    "tuic")
+        # TUIC V5 (必须 TLS)
+        generate_self_signed_cert
+        INBOUND_JSON=$(cat <<EOF
+        {
+            "type": "tuic",
+            "tag": "tuic-in",
+            "listen": "${LISTEN_IP}",
+            "listen_port": ${PORT},
+            "users": [{ "uuid": "${UUID}", "password": "${PASSWORD}", "name": "user1" }],
+            "congestion_control": "bbr",
+            "tls": {
+                "enabled": true,
+                "certificate_path": "${CERT_Path}/cert.pem",
+                "key_path": "${CERT_Path}/private.key",
+                "alpn": ["h3"]
+            }
+        }
+EOF
+)
+    ;;
+    
+    "shadowsocks")
+        # Shadowsocks 2022
+        METHOD="2022-blake3-aes-128-gcm"
+        INBOUND_JSON=$(cat <<EOF
+        {
+            "type": "shadowsocks",
+            "tag": "ss-in",
+            "listen": "${LISTEN_IP}",
+            "listen_port": ${PORT},
+            "method": "${METHOD}",
+            "password": "${PASSWORD}"
+        }
+EOF
+)
+    ;;
+    *)
+        echo -e "${RED}[Error] 不支持的协议: ${NODE_TYPE}${NC}"
+        exit 1
+    ;;
+esac
+
+# --- 6. 写入完整配置文件 ---
+echo -e "${GREEN}[Step 3] 生成配置文件 (${NODE_TYPE})...${NC}"
+
+cat > ${CONFIG_FILE} <<EOF
+{
+  "log": { "level": "info", "timestamp": true },
+  ${DNS_CONFIG}
+  "inbounds": [
+    ${INBOUND_JSON}
+  ],
+  "outbounds": [{ "type": "direct", "tag": "direct" }]
+}
+EOF
+
+# --- 7. 启动管理 ---
+echo -e "${GREEN}[Step 4] 启动服务...${NC}"
+RUN_CMD="${INSTALL_PATH} run -c ${CONFIG_FILE}"
+
+if command -v systemctl >/dev/null 2>&1 && pidof systemd >/dev/null 2>&1; then
+    # Systemd 模式
+cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box service
+After=network.target
+
+[Service]
+ExecStart=${RUN_CMD}
+Restart=on-failure
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable sing-box
+    systemctl restart sing-box
+else
+    # Docker/容器模式：仅提示，不阻塞脚本结束
+    echo -e "${YELLOW}[Warning] 无 Systemd 环境，请使用以下命令启动:${NC}"
+    echo -e "${GREEN}${RUN_CMD} &${NC}"
+fi
+
+# --- 8. 输出连接信息 ---
+echo -e "\n=================================================="
+echo -e "         ${GREEN}Sing-box 配置完成: ${NODE_TYPE}${NC}"
+echo -e "=================================================="
+echo -e "端口: ${PORT}"
+echo -e "UUID: ${YELLOW}${UUID}${NC}"
+
+if [ "$NODE_TYPE" == "vless" ]; then
+    echo -e "类型: VLESS + Reality + Vision"
+    echo -e "Public Key: ${YELLOW}${PUBLIC_KEY}${NC}"
+    echo -e "Short ID: ${YELLOW}${SHORT_ID}${NC}"
+    echo -e "Domain: ${SERVER_DOMAIN}"
+
+elif [ "$NODE_TYPE" == "vmess" ]; then
+    echo -e "类型: VMess + WS"
+    echo -e "Path: ${WS_PATH}"
+    if [ "$ENABLE_TLS" = true ]; then
+        echo -e "TLS : ${GREEN}Enabled (自签名/指定证书)${NC}"
+        echo -e "注意: 客户端需开启 allowInsecure (如果使用自签名)"
+    else
+        echo -e "TLS : ${RED}Disabled${NC}"
+    fi
+
+elif [ "$NODE_TYPE" == "tuic" ]; then
+    echo -e "类型: TUIC V5 (QUIC)"
+    echo -e "Password: ${YELLOW}${PASSWORD}${NC}"
+    echo -e "注意: TUIC 强制使用 TLS，已生成自签名证书。"
+    echo -e "客户端请开启 allowInsecure 选项。"
+
+elif [ "$NODE_TYPE" == "shadowsocks" ]; then
+    echo -e "Password: ${YELLOW}${PASSWORD}${NC}"
+    echo -e "Method: ${METHOD}"
+fi
+echo -e "=================================================="
